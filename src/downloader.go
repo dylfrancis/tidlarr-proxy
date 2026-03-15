@@ -3,9 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"github.com/cavaliergopher/grab/v3"
-	"github.com/tidwall/gjson"
-	"go.senan.xyz/taglib"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +11,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/cavaliergopher/grab/v3"
+	"github.com/tidwall/gjson"
+	"go.senan.xyz/taglib"
 )
 
 type File struct {
@@ -25,6 +26,7 @@ type File struct {
 	DownloadLink string
 	completed    bool
 	Lyrics       string
+	Duration     float64
 }
 
 type Download struct {
@@ -205,6 +207,7 @@ func generateDownload(filename string, Id string, numTracks int) {
 		track.Index = gjson.Get(valueString, "item.trackNumber").String()
 		track.mediaNumber = gjson.Get(valueString, "item.volumeNumber").String()
 		track.isrc = gjson.Get(valueString, "item.isrc").String()
+		track.Duration = gjson.Get(valueString, "item.duration").Float()
 		track.completed = false
 		var queryUrl string = "/track/?id=" + strconv.Itoa(track.Id)
 		if download.hires == false {
@@ -351,24 +354,83 @@ func startDownload(Id string) {
 	}
 	//Download each track
 	for _, track := range download.Files {
-		var Name string = track.Index + " - " + download.Artist + " - " + track.Name + ".flac"
-		if download.hires {
-			cmd := "echo \"" + track.DownloadLink + "\" | base64 -d | ffmpeg -protocol_whitelist file,http,https,tcp,tls,pipe -i pipe: -acodec copy \"" + Folder + Name + "\""
-			out, err := exec.Command("sh","-c",cmd).Output()
-			if err != nil {
-				fmt.Println("Download failed")
-				fmt.Println(cmd)
-				fmt.Println(err)
-				fmt.Println(out)
+		var Name = track.Index + " - " + download.Artist + " - " + track.Name + ".flac"
+		var success = false
+
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				fmt.Println("Retry attempt " + strconv.Itoa(attempt) + " for track " + track.Name)
+				// Re-fetch the download link from a (hopefully different) mirror
+				var queryUrl = "/track/?id=" + strconv.Itoa(track.Id)
+				if download.hires == false {
+					queryUrl += "&quality=LOSSLESS"
+				}
+				bodyBytes, err := request(queryUrl)
+				if err != nil {
+					fmt.Println("Failed to re-fetch track URL: " + err.Error())
+					continue
+				}
+				track.DownloadLink = gjson.Get(bodyBytes, "data.manifest").String()
+				if !download.hires {
+					manifest, _ := base64.StdEncoding.DecodeString(track.DownloadLink)
+					track.DownloadLink = gjson.Get(string(manifest), "urls.0").String()
+				}
+				// Remove the previous bad file
+				err = os.Remove(Folder + Name)
+				if err != nil {
+					return
+				}
 			}
-		} else {
-			_, err := grab.Get(Folder+Name, track.DownloadLink)
-			if err != nil {
-				fmt.Println("Failed to download track " + track.Name)
-				fmt.Println(err)
-				return
+
+			// Download the track
+			if download.hires {
+				cmd := "echo \"" + track.DownloadLink + "\" | base64 -d | ffmpeg -protocol_whitelist file,http,https,tcp,tls,pipe -i pipe: -acodec copy \"" + Folder + Name + "\""
+				out, err := exec.Command("sh", "-c", cmd).Output()
+				if err != nil {
+					fmt.Println("Download failed")
+					fmt.Println(cmd)
+					fmt.Println(err)
+					fmt.Println(out)
+					continue
+				}
+			} else {
+				_, err := grab.Get(Folder+Name, track.DownloadLink)
+				if err != nil {
+					fmt.Println("Failed to download track " + track.Name)
+					fmt.Println(err)
+					continue
+				}
 			}
+
+			// Validate duration by decoding with ffmpeg
+			if track.Duration > 0 {
+				out, err := exec.Command("ffmpeg", "-i", Folder+Name, "-f", "null", "-").CombinedOutput()
+				if err != nil {
+					fmt.Println("ffmpeg validation failed for " + track.Name + ", skipping validation")
+				} else {
+					re := regexp.MustCompile(`time=(\d+):(\d+):(\d+\.\d+)`)
+					matches := re.FindAllStringSubmatch(string(out), -1)
+					if len(matches) > 0 {
+						last := matches[len(matches)-1]
+						hours, _ := strconv.ParseFloat(last[1], 64)
+						minutes, _ := strconv.ParseFloat(last[2], 64)
+						seconds, _ := strconv.ParseFloat(last[3], 64)
+						actualDuration := hours*3600 + minutes*60 + seconds
+						if actualDuration < track.Duration*0.8 {
+							fmt.Printf("Track %s is too short: got %.1fs, expected %.1fs. Likely a preview.\n", track.Name, actualDuration, track.Duration)
+							continue
+						}
+					}
+				}
+			}
+			success = true
+			break
 		}
+
+		if !success {
+			fmt.Println("Failed to download full track after 3 attempts: " + track.Name)
+		}
+
 		track.completed = true
 		download.downloaded += 1
 		writeMetaData(*download, track, Folder+Name)
