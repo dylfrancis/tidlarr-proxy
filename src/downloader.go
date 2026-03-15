@@ -405,6 +405,7 @@ func startDownload(Id string) {
 			// Validate duration by decoding with ffmpeg
 			if track.Duration > 0 {
 				out, err := exec.Command("ffmpeg", "-i", Folder+Name, "-f", "null", "-").CombinedOutput()
+				downloadDurationMin := 0.9 // Can tune this value based on expected download accuracy
 				if err != nil {
 					fmt.Println("ffmpeg validation failed for " + track.Name + ", skipping validation")
 				} else {
@@ -416,8 +417,8 @@ func startDownload(Id string) {
 						minutes, _ := strconv.ParseFloat(last[2], 64)
 						seconds, _ := strconv.ParseFloat(last[3], 64)
 						actualDuration := hours*3600 + minutes*60 + seconds
-						if actualDuration < track.Duration*0.8 {
-							fmt.Printf("Track %s is too short: got %.1fs, expected %.1fs. Likely a preview.\n", track.Name, actualDuration, track.Duration)
+						if actualDuration < track.Duration*downloadDurationMin {
+							fmt.Printf("Track %s is too short: got %.1fs, expected %.1fs. Likely a preview or incomplete download.\n", track.Name, actualDuration, track.Duration)
 							continue
 						}
 					}
