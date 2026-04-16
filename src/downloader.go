@@ -402,25 +402,17 @@ func startDownload(Id string) {
 				}
 			}
 
-			// Validate duration by decoding with ffmpeg
+			// Validate duration with ffprobe
 			if track.Duration > 0 {
-				out, err := exec.Command("ffmpeg", "-i", Folder+Name, "-f", "null", "-").CombinedOutput()
+				out, err := exec.Command("ffprobe", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", "-v", "quiet", Folder+Name).Output()
 				downloadDurationMin := 0.9 // Can tune this value based on expected download accuracy
 				if err != nil {
-					fmt.Println("ffmpeg validation failed for " + track.Name + ", skipping validation")
+					fmt.Println("ffprobe validation failed for " + track.Name + ", skipping validation")
 				} else {
-					re := regexp.MustCompile(`time=(\d+):(\d+):(\d+\.\d+)`)
-					matches := re.FindAllStringSubmatch(string(out), -1)
-					if len(matches) > 0 {
-						last := matches[len(matches)-1]
-						hours, _ := strconv.ParseFloat(last[1], 64)
-						minutes, _ := strconv.ParseFloat(last[2], 64)
-						seconds, _ := strconv.ParseFloat(last[3], 64)
-						actualDuration := hours*3600 + minutes*60 + seconds
-						if actualDuration < track.Duration*downloadDurationMin {
-							fmt.Printf("Track %s is too short: got %.1fs, expected %.1fs. Likely a preview or incomplete download.\n", track.Name, actualDuration, track.Duration)
-							continue
-						}
+					actualDuration, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+					if err == nil && actualDuration < track.Duration*downloadDurationMin {
+						fmt.Printf("Track %s is too short: got %.1fs, expected %.1fs. Likely a preview or incomplete download.\n", track.Name, actualDuration, track.Duration)
+						continue
 					}
 				}
 			}
